@@ -222,7 +222,7 @@ textarea::placeholder { color: var(--muted); }
       <input type="file" id="archivo" multiple hidden
         accept="image/*,.pdf,.docx,.xlsx,.xlsm,.csv,.tsv,.txt,.md,.json,.xml,.html,.css,.js,.ts,.py,.java,.c,.cpp,.cs,.php,.sql,.yaml,.yml,.log">
       <textarea id="texto" rows="1" placeholder="Escribe tu mensaje a TAMPY..."></textarea>
-      <button class="icono" id="enviar" title="Enviar">
+      <button type="button" class="icono" id="enviar" title="Enviar">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
       </button>
     </div>
@@ -234,42 +234,80 @@ textarea::placeholder { color: var(--muted); }
 <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
 <script>
 const REQUIERE_CLAVE = {{ 'true' if requiere_clave else 'false' }};
-if(!localStorage.getItem('tampy_profile')) localStorage.setItem('tampy_profile', crypto.randomUUID());
 const STORAGE_MODE = {{ storage|tojson }};
 const $ = id => document.getElementById(id);
-const chat=$('chat'),scroll=$('scroll'),texto=$('texto'),btnEnviar=$('enviar'),previas=$('previas'),caja=$('caja'),inputArchivo=$('archivo');
-let historial=[],pendientes=[],ocupado=false,conversationId=localStorage.getItem('tampy_conversation_id')||crypto.randomUUID();
-$('storageBadge').textContent=STORAGE_MODE==='postgres'?'☁ nube':'💻 local';
+const safeUUID = () => (window.crypto && typeof window.crypto.randomUUID === 'function') ? window.crypto.randomUUID() : ('id-' + Date.now() + '-' + Math.random().toString(16).slice(2));
 
-function logoHTML(){return '<svg class="avatar"><use href="#logo"/></svg>'}
+let historial = [], pendientes = [], ocupado = false, conversationId = null;
+let chat, scroll, texto, btnEnviar, previas, caja, inputArchivo;
+
+function initTampy(){
+  chat=$('chat'); scroll=$('scroll'); texto=$('texto'); btnEnviar=$('enviar'); previas=$('previas'); caja=$('caja'); inputArchivo=$('archivo');
+  if(!chat || !scroll || !texto || !btnEnviar){ console.error('TAMPY: faltan elementos del chat'); return; }
+  try {
+    if(!localStorage.getItem('tampy_profile')) localStorage.setItem('tampy_profile', safeUUID());
+    conversationId=localStorage.getItem('tampy_conversation_id') || safeUUID();
+  } catch(e) { conversationId=safeUUID(); console.warn('TAMPY localStorage no disponible',e); }
+  const badge=$('storageBadge'); if(badge) badge.textContent=STORAGE_MODE==='postgres'?'☁ nube':'💻 local';
+  inputArchivo.addEventListener('change',async e=>{await procesarArchivos([...e.target.files]);inputArchivo.value=''});
+  texto.addEventListener('paste',async e=>{const imgs=[...(e.clipboardData?.files||[])].filter(f=>f.type.startsWith('image/'));if(imgs.length){e.preventDefault();await procesarArchivos(imgs)}});
+  ['dragenter','dragover'].forEach(ev=>caja.addEventListener(ev,e=>{e.preventDefault();caja.classList.add('arrastrando')}));
+  ['dragleave','drop'].forEach(ev=>caja.addEventListener(ev,e=>{e.preventDefault();caja.classList.remove('arrastrando')}));
+  caja.addEventListener('drop',e=>procesarArchivos([...e.dataTransfer.files]));
+  texto.addEventListener('input',autoAltura);
+  texto.addEventListener('keydown',e=>{
+    if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); e.stopPropagation(); enviar(); }
+  });
+  btnEnviar.addEventListener('click',e=>{e.preventDefault(); enviar();});
+  cargarConversacionActual();
+}
+
+function logoHTML(){return '<svg class="avatar"><use href="#logo"></use></svg>'}
 function bajar(){scroll.scrollTop=scroll.scrollHeight}
 function abrirPanel(id){$(id).classList.add('show'); if(id==='historialPanel') cargarConversaciones(); if(id==='memoriaPanel') cargarMemorias()}
 function cerrarPanel(id){$(id).classList.remove('show')}
-function renderMarkdown(md){const html=DOMPurify.sanitize(marked.parse(md,{breaks:true}));const cont=document.createElement('div');cont.innerHTML=html;cont.querySelectorAll('a').forEach(a=>{a.target='_blank';a.rel='noopener noreferrer'});cont.querySelectorAll('pre').forEach(pre=>{const b=document.createElement('button');b.className='copiar';b.textContent='Copiar';b.onclick=()=>{navigator.clipboard.writeText(pre.innerText.replace(/Copiar$/,'').trim());b.textContent='¡Copiado!';setTimeout(()=>b.textContent='Copiar',1500)};pre.appendChild(b)});return cont}
+function renderMarkdown(md){
+  if(window.marked && window.DOMPurify){
+    const html=DOMPurify.sanitize(marked.parse(md,{breaks:true}));
+    const cont=document.createElement('div');cont.innerHTML=html;
+    cont.querySelectorAll('a').forEach(a=>{a.target='_blank';a.rel='noopener noreferrer'});
+    cont.querySelectorAll('pre').forEach(pre=>{const b=document.createElement('button');b.type='button';b.className='copiar';b.textContent='Copiar';b.onclick=()=>{navigator.clipboard?.writeText(pre.innerText.replace(/Copiar$/,'').trim());b.textContent='¡Copiado!';setTimeout(()=>b.textContent='Copiar',1500)};pre.appendChild(b)});return cont;
+  }
+  const cont=document.createElement('div');cont.style.whiteSpace='pre-wrap';cont.textContent=md;return cont;
+}
 function quitarBienvenida(){const b=$('bienvenida');if(b)b.remove()}
 function agregarUsuario(t,adj){quitarBienvenida();const div=document.createElement('div');div.className='msg user';const c=document.createElement('div');c.className='cuerpo';if(adj.length){const f=document.createElement('div');f.className='adjuntos-msg';adj.forEach(a=>{if(a.tipo==='imagen'){const im=document.createElement('img');im.src=a.dataUrl;f.appendChild(im)}else{const x=document.createElement('div');x.className='chip';x.textContent='📄 '+a.nombre;x.style.paddingRight='10px';f.appendChild(x)}});c.appendChild(f)}if(t)c.appendChild(document.createTextNode(t));div.appendChild(c);chat.appendChild(div);bajar()}
-function agregarBot(contenido,esError=false){const div=document.createElement('div');div.className='msg bot';div.innerHTML=logoHTML();const c=document.createElement('div');c.className='cuerpo'+(esError?' error':'');if(esError)c.textContent=contenido;else{c.appendChild(renderMarkdown(contenido));const ex=document.createElement('div');ex.className='exportes';[['txt','TXT'],['docx','Word'],['pdf','PDF'],['xlsx','Excel']].forEach(([f,l])=>{const b=document.createElement('button');b.textContent='⬇ '+l;b.onclick=()=>exportar(contenido,f);ex.appendChild(b)});c.appendChild(ex)}div.appendChild(c);chat.appendChild(div);bajar();return div}
+function agregarBot(contenido,esError=false){const div=document.createElement('div');div.className='msg bot';div.innerHTML=logoHTML();const c=document.createElement('div');c.className='cuerpo'+(esError?' error':'');if(esError)c.textContent=contenido;else{c.appendChild(renderMarkdown(contenido));const ex=document.createElement('div');ex.className='exportes';[['txt','TXT'],['docx','Word'],['pdf','PDF'],['xlsx','Excel']].forEach(([f,l])=>{const b=document.createElement('button');b.type='button';b.textContent='⬇ '+l;b.onclick=()=>exportar(contenido,f);ex.appendChild(b)});c.appendChild(ex)}div.appendChild(c);chat.appendChild(div);bajar();return div}
 function agregarEscribiendo(){const d=document.createElement('div');d.className='msg bot';d.innerHTML=logoHTML()+'<div class="cuerpo"><span class="puntos"><i></i><i></i><i></i></span></div>';chat.appendChild(d);bajar();return d}
-async function api(url,opt={}){opt.headers=Object.assign({},opt.headers);const clave=sessionStorage.getItem('tampy_clave');if(clave)opt.headers['X-Clave']=clave;let r=await fetch(url,opt);if(r.status===401&&REQUIERE_CLAVE){const n=prompt('Clave de acceso de TAMPY:');if(!n)return r;sessionStorage.setItem('tampy_clave',n);opt.headers['X-Clave']=n;r=await fetch(url,opt)}return r}
-function profileHeader(){return {'X-Tampy-Profile':localStorage.getItem('tampy_profile')||'public'}}
+async function api(url,opt={}){opt.headers=Object.assign({},opt.headers||{});try{const clave=sessionStorage.getItem('tampy_clave');if(clave)opt.headers['X-Clave']=clave}catch(e){}let r=await fetch(url,opt);if(r.status===401&&REQUIERE_CLAVE){const n=prompt('Clave de acceso de TAMPY:');if(!n)return r;sessionStorage.setItem('tampy_clave',n);opt.headers['X-Clave']=n;r=await fetch(url,opt)}return r}
+function profileHeader(){let p='public';try{p=localStorage.getItem('tampy_profile')||p}catch(e){}return {'X-Tampy-Profile':p}}
 function redimensionarImagen(file){return new Promise((res,rej)=>{const u=URL.createObjectURL(file),im=new Image();im.onload=()=>{const M=1568,s=Math.min(1,M/Math.max(im.width,im.height)),c=document.createElement('canvas');c.width=Math.round(im.width*s);c.height=Math.round(im.height*s);c.getContext('2d').drawImage(im,0,0,c.width,c.height);URL.revokeObjectURL(u);res(c.toDataURL('image/jpeg',.85))};im.onerror=()=>rej(new Error('No pude abrir '+file.name));im.src=u})}
 async function procesarArchivos(lista){for(const file of lista){if(pendientes.length>=5){alert('Máximo 5 adjuntos.');break}try{if(file.type.startsWith('image/')){pendientes.push({tipo:'imagen',nombre:file.name||'imagen.jpg',dataUrl:await redimensionarImagen(file)})}else{const fd=new FormData();fd.append('archivo',file);const r=await api('/api/archivo',{method:'POST',body:fd});const d=await r.json();if(!r.ok)throw new Error(d.error);pendientes.push({tipo:'archivo',nombre:d.nombre,texto:d.texto,truncado:d.truncado})}}catch(e){alert(e.message)}}pintarPrevias()}
-function pintarPrevias(){previas.innerHTML='';pendientes.forEach((a,i)=>{const c=document.createElement('div');c.className='chip';if(a.tipo==='imagen'){const im=document.createElement('img');im.src=a.dataUrl;c.appendChild(im)}const s=document.createElement('span');s.textContent=(a.tipo==='archivo'?'📄 ':'')+a.nombre;c.appendChild(s);const x=document.createElement('button');x.textContent='×';x.onclick=()=>{pendientes.splice(i,1);pintarPrevias()};c.appendChild(x);previas.appendChild(c)})}
-inputArchivo.addEventListener('change',async e=>{await procesarArchivos([...e.target.files]);inputArchivo.value=''})
-texto.addEventListener('paste',async e=>{const imgs=[...(e.clipboardData?.files||[])].filter(f=>f.type.startsWith('image/'));if(imgs.length){e.preventDefault();await procesarArchivos(imgs)}})
-['dragenter','dragover'].forEach(ev=>caja.addEventListener(ev,e=>{e.preventDefault();caja.classList.add('arrastrando')}));['dragleave','drop'].forEach(ev=>caja.addEventListener(ev,e=>{e.preventDefault();caja.classList.remove('arrastrando')}));caja.addEventListener('drop',e=>procesarArchivos([...e.dataTransfer.files]));
+function pintarPrevias(){previas.innerHTML='';pendientes.forEach((a,i)=>{const c=document.createElement('div');c.className='chip';if(a.tipo==='imagen'){const im=document.createElement('img');im.src=a.dataUrl;c.appendChild(im)}const s=document.createElement('span');s.textContent=(a.tipo==='archivo'?'📄 ':'')+a.nombre;c.appendChild(s);const x=document.createElement('button');x.type='button';x.textContent='×';x.onclick=()=>{pendientes.splice(i,1);pintarPrevias()};c.appendChild(x);previas.appendChild(c)})}
 async function guardarConversacion(){if(!historial.length)return;try{const title=(historial.find(m=>m.role==='user')?.content||'Nueva conversación');const t=typeof title==='string'?title.replace(/\s+/g,' ').slice(0,70):'Conversación';const r=await api('/api/conversations',{method:'POST',headers:{'Content-Type':'application/json',...profileHeader()},body:JSON.stringify({id:conversationId,title:t,mensajes:historial})});if(r.ok)localStorage.setItem('tampy_conversation_id',conversationId);else console.warn('No se pudo guardar la conversación',await r.text())}catch(e){console.warn('No se pudo guardar la conversación:',e)}}
-async function enviar(){if(ocupado)return;const msg=texto.value.trim();if(!msg&&!pendientes.length)return;const adj=pendientes;pendientes=[];pintarPrevias();const imgs=adj.filter(a=>a.tipo==='imagen'),files=adj.filter(a=>a.tipo==='archivo');let body='';files.forEach(a=>body+=`[Archivo adjunto: ${a.nombre}]\n${a.texto}\n${a.truncado?'[...archivo recortado]\n':''}[Fin del archivo]\n\n`);body+=msg||(imgs.length?'Describe y analiza esta imagen.':'Analiza este archivo.');const content=imgs.length?[{type:'text',text:body},...imgs.map(a=>({type:'image_url',image_url:{url:a.dataUrl}}))]:body;agregarUsuario(msg,adj);historial.push({role:'user',content});texto.value='';autoAltura();ocupado=true;btnEnviar.disabled=true;const w=agregarEscribiendo();try{const r=await api('/api/chat',{method:'POST',headers:{'Content-Type':'application/json',...profileHeader()},body:JSON.stringify({mensajes:historial})});const d=await r.json();w.remove();if(!r.ok)throw new Error(d.error||'Error');historial.push({role:'assistant',content:d.respuesta});agregarBot(d.respuesta);await guardarConversacion()}catch(e){w.remove();historial.pop();agregarBot('⚠️ '+e.message,true)}ocupado=false;btnEnviar.disabled=false;texto.focus()}
+async function enviar(){
+  if(ocupado)return;
+  const msg=texto.value.trim(); if(!msg&&!pendientes.length)return;
+  const adj=pendientes.slice(); pendientes=[]; pintarPrevias();
+  const imgs=adj.filter(a=>a.tipo==='imagen'),files=adj.filter(a=>a.tipo==='archivo');let body='';
+  files.forEach(a=>body+=`[Archivo adjunto: ${a.nombre}]\n${a.texto}\n${a.truncado?'[...archivo recortado]\n':''}[Fin del archivo]\n\n`);
+  body+=msg||(imgs.length?'Describe y analiza esta imagen.':'Analiza este archivo.');
+  const content=imgs.length?[{type:'text',text:body},...imgs.map(a=>({type:'image_url',image_url:{url:a.dataUrl}}))]:body;
+  agregarUsuario(msg,adj);historial.push({role:'user',content});texto.value='';autoAltura();ocupado=true;btnEnviar.disabled=true;
+  const w=agregarEscribiendo();
+  try{const r=await api('/api/chat',{method:'POST',headers:{'Content-Type':'application/json',...profileHeader()},body:JSON.stringify({mensajes:historial})});let d={};try{d=await r.json()}catch(e){throw new Error('El servidor no devolvió una respuesta válida. HTTP '+r.status)}w.remove();if(!r.ok)throw new Error(d.error||('Error del servidor HTTP '+r.status));historial.push({role:'assistant',content:d.respuesta||'No recibí contenido de respuesta.'});agregarBot(d.respuesta||'No recibí contenido de respuesta.');await guardarConversacion()}catch(e){w.remove();historial.pop();agregarBot('⚠️ '+e.message,true)}ocupado=false;btnEnviar.disabled=false;texto.focus();
+}
 async function cargarConversaciones(){const r=await api('/api/conversations',{headers:profileHeader()});if(!r.ok)return;const d=await r.json();const box=$('listaConversaciones');box.innerHTML='';d.conversaciones.forEach(c=>{const x=document.createElement('div');x.className='conv-item';x.innerHTML=`<b>${esc(c.title)}</b><div style="font-size:11px;color:var(--muted);margin-top:4px">${new Date(c.updated_at).toLocaleString()}</div>`;x.onclick=()=>abrirConversacion(c.id);box.appendChild(x)});if(!d.conversaciones.length)box.innerHTML='<p style="color:var(--muted)">Aún no hay conversaciones guardadas.</p>'}
 async function abrirConversacion(id){const r=await api('/api/conversations/'+id,{headers:profileHeader()});if(!r.ok)return;const d=await r.json();conversationId=id;localStorage.setItem('tampy_conversation_id',id);historial=d.messages||[];chat.innerHTML='';historial.forEach(m=>m.role==='user'?agregarUsuario(typeof m.content==='string'?m.content:'',[]):agregarBot(m.content));cerrarPanel('historialPanel')}
-async function cargarMemorias(){const r=await api('/api/memories',{headers:profileHeader()});if(!r.ok)return;const d=await r.json();const box=$('listaMemorias');box.innerHTML='';d.memories.forEach(m=>{const x=document.createElement('div');x.className='mem-item';const s=document.createElement('span');s.textContent=m.content;const b=document.createElement('button');b.className='small-btn';b.textContent='Eliminar';b.onclick=async()=>{await api('/api/memories/'+m.id,{method:'DELETE',headers:profileHeader()});cargarMemorias()};x.appendChild(s);x.appendChild(b);box.appendChild(x)});if(!d.memories.length)box.innerHTML='<p style="color:var(--muted)">No hay recuerdos guardados.</p>'}
+async function cargarMemorias(){const r=await api('/api/memories',{headers:profileHeader()});if(!r.ok)return;const d=await r.json();const box=$('listaMemorias');box.innerHTML='';d.memories.forEach(m=>{const x=document.createElement('div');x.className='mem-item';const s=document.createElement('span');s.textContent=m.content;const b=document.createElement('button');b.type='button';b.className='small-btn';b.textContent='Eliminar';b.onclick=async()=>{await api('/api/memories/'+m.id,{method:'DELETE',headers:profileHeader()});cargarMemorias()};x.appendChild(s);x.appendChild(b);box.appendChild(x)});if(!d.memories.length)box.innerHTML='<p style="color:var(--muted)">No hay recuerdos guardados.</p>'}
 async function guardarMemoria(){const inp=$('nuevaMemoria'),v=inp.value.trim();if(!v)return;await api('/api/memories',{method:'POST',headers:{'Content-Type':'application/json',...profileHeader()},body:JSON.stringify({content:v,category:'usuario'})});inp.value='';cargarMemorias()}
-async function exportar(text,fmt){const r=await api('/api/export',{method:'POST',headers:{'Content-Type':'application/json',...profileHeader()},body:JSON.stringify({text,format:fmt,name:'TAMPY_documento'})});if(!r.ok){const d=await r.json();alert(d.error||'No se pudo generar');return}const blob=await r.blob();const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`TAMPY_documento.${fmt}`;a.click();URL.revokeObjectURL(a.href)}
+async function exportar(text,fmt){const r=await api('/api/export',{method:'POST',headers:{'Content-Type':'application/json',...profileHeader()},body:JSON.stringify({text,format:fmt,name:'TAMPY_documento'})});if(!r.ok){const d=await r.json();alert(d.error||'No se pudo generar');return}const blob=await r.blob();const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`TAMPY_documento.${fmt}`;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000)}
 function esc(s){return String(s).replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]))}
-function nuevaConversacion(){historial=[];pendientes=[];conversationId=crypto.randomUUID();localStorage.setItem('tampy_conversation_id',conversationId);chat.innerHTML=`<div id="bienvenida"><svg><use href="#logo"/></svg><h1>¿En qué te ayudo hoy?</h1><p>Escribe, sube una imagen o adjunta un documento.</p><div class="sugerencias"><button onclick="sugerir('Resume este documento en puntos clave')">Resumir un documento</button><button onclick="sugerir('Explícame qué hay en esta imagen')">Analizar una imagen</button><button onclick="sugerir('Ayúdame a redactar un correo profesional')">Redactar un correo</button><button onclick="sugerir('Revisa mi código y dime qué errores tiene')">Revisar código</button></div></div>`}
+function nuevaConversacion(){historial=[];pendientes=[];conversationId=safeUUID();try{localStorage.setItem('tampy_conversation_id',conversationId)}catch(e){}chat.innerHTML=`<div id="bienvenida"><svg><use href="#logo"></use></svg><h1>¿En qué te ayudo hoy?</h1><p>Escribe, sube una imagen o adjunta un documento.</p><div class="sugerencias"><button type="button" onclick="sugerir('Resume este documento en puntos clave')">Resumir un documento</button><button type="button" onclick="sugerir('Explícame qué hay en esta imagen')">Analizar una imagen</button><button type="button" onclick="sugerir('Ayúdame a redactar un correo profesional')">Redactar un correo</button><button type="button" onclick="sugerir('Revisa mi código y dime qué errores tiene')">Revisar código</button></div></div>`}
 function sugerir(t){texto.value=t;autoAltura();texto.focus()}function autoAltura(){texto.style.height='auto';texto.style.height=Math.min(texto.scrollHeight,200)+'px'}
-texto.addEventListener('input',autoAltura);texto.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing){e.preventDefault();enviar()}});btnEnviar.addEventListener('click',enviar);
-(async()=>{try{const id=localStorage.getItem('tampy_conversation_id');if(id){const r=await api('/api/conversations/'+id,{headers:profileHeader()});if(r.ok){const d=await r.json();historial=d.messages||[];chat.innerHTML='';historial.forEach(m=>m.role==='user'?agregarUsuario(typeof m.content==='string'?m.content:'',[]):agregarBot(m.content))}}}catch(e){console.warn(e)}})();
-</script>
+async function cargarConversacionActual(){try{const id=localStorage.getItem('tampy_conversation_id');if(id){const r=await api('/api/conversations/'+id,{headers:profileHeader()});if(r.ok){const d=await r.json();historial=d.messages||[];chat.innerHTML='';historial.forEach(m=>m.role==='user'?agregarUsuario(typeof m.content==='string'?m.content:'',[]):agregarBot(m.content))}}}catch(e){console.warn('No se pudo cargar la conversación',e)}}
+window.addEventListener('error',e=>console.error('TAMPY JS error:',e.error||e.message));
+if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',initTampy); else initTampy();
+</script></script>
 </body>
 </html>
