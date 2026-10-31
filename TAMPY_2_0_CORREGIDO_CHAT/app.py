@@ -7,6 +7,7 @@ import os
 import re
 import sqlite3
 import uuid
+
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -40,7 +41,6 @@ MODELOS_TEXTO = [m for m in [
 MODELOS_VISION = [m for m in [
     os.environ.get("MODELO_VISION"),
     "qwen/qwen3.8-27b",
-    "qwen/qwen3.6-27b",
 ] if m]
 
 SYSTEM_BASE = (
@@ -85,10 +85,11 @@ def sqlite_conn():
 
 def pg_conn():
     import psycopg
+    from psycopg.rows import dict_row
     url = DATABASE_URL
     if url and "sslmode=" not in url:
         url += ("&" if "?" in url else "?") + "sslmode=require"
-    return psycopg.connect(url, autocommit=True, connect_timeout=10)
+    return psycopg.connect(url, autocommit=True, connect_timeout=10, row_factory=dict_row)
 
 
 def init_db():
@@ -307,16 +308,25 @@ def diagnostico():
         db_ok=True
     except Exception as e:
         db_error=str(e)[:300]
+    memoria_ok=False
+    memoria_error=''
+    try:
+        list_memories()
+        memoria_ok=True
+    except Exception as e:
+        memoria_error=str(e)[:300]
     return jsonify({
-        'ok': bool(client) and db_ok,
+        'ok': bool(client) and db_ok and memoria_ok,
         'groq_configurada': bool(GROQ_API_KEY),
         'base_datos': db_kind(),
         'base_datos_ok': db_ok,
+        'memoria_lectura_ok': memoria_ok,
         'database_url_configurada': bool(DATABASE_URL),
         'clave_tampy_configurada': bool(CLAVE_ACCESO),
         'modelo_texto': MODELOS_TEXTO[0] if MODELOS_TEXTO else None,
         'modelo_vision': MODELOS_VISION[0] if MODELOS_VISION else None,
-        'detalle_bd': db_error
+        'detalle_bd': db_error,
+        'detalle_memoria': memoria_error
     })
 
 @app.route('/api/conversations',methods=['GET'])
